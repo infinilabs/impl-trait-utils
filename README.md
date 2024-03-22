@@ -2,6 +2,12 @@
 
 Utilities for working with `impl Trait`s in Rust.
 
+> [!IMPORTANT]
+> This fork of [rust-lang/impl-trait-utils](/rust-lang/impl-trait-utils)
+> includes the merged PRs rust-lang/impl-trait-utils#20 and
+> rust-lang/impl-trait-utils#30. Once these PRs are merged and the official
+> release is available, you should switch to using that release.
+
 ## `trait_variant`
 
 `trait_variant` generates a specialized version of a base trait that uses `async fn` and/or `-> impl Trait`.

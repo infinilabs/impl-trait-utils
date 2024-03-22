@@ -1,4 +1,5 @@
 // Copyright (c) 2023 Google LLC
+// Copyright (c) 2023 Various contributors (see git history)
 //
 // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
 // https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
@@ -11,48 +12,56 @@ use std::iter;
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{
-    parse::{Parse, ParseStream}, parse_macro_input, parse_quote, punctuated::Punctuated, token::Plus, Error, FnArg, GenericParam, Ident, ItemTrait, Pat, PatIdent, PatType, Receiver, Result, ReturnType, Signature, Token, TraitBound, TraitItem, TraitItemConst, TraitItemFn, TraitItemType, Type, TypeGenerics, TypeImplTrait, TypeParam, TypeParamBound, TypeReference, WhereClause
+    parse::{discouraged::Speculative as _, Parse, ParseStream},
+    parse_macro_input, parse_quote,
+    punctuated::Punctuated,
+    token::Plus,
+    Error, FnArg, GenericParam, Ident, ItemTrait, Pat, PatIdent, PatType, Receiver, Result,
+    ReturnType, Signature, Token, TraitBound, TraitItem, TraitItemConst, TraitItemFn,
+    TraitItemType, Type, TypeGenerics, TypeImplTrait, TypeParam, TypeParamBound, TypeReference,
+    WhereClause,
 };
 
-struct Attrs {
-    variant: MakeVariant,
+#[derive(Clone)]
+struct Variant {
+    name: Option<Ident>,
+    _colon: Option<Token![:]>,
+    bounds: Punctuated<TraitBound, Plus>,
 }
 
-impl Parse for Attrs {
+fn parse_bounds_only(input: ParseStream) -> Result<Option<Variant>> {
+    let fork = input.fork();
+    let colon: Option<Token![:]> = fork.parse()?;
+    let bounds = match fork.parse_terminated(TraitBound::parse, Token![+]) {
+        Ok(x) => Ok(x),
+        Err(e) if colon.is_some() => Err(e),
+        Err(_) => return Ok(None),
+    };
+    input.advance_to(&fork);
+    Ok(Some(Variant {
+        name: None,
+        _colon: colon,
+        bounds: bounds?,
+    }))
+}
+
+fn parse_fallback(input: ParseStream) -> Result<Variant> {
+    let name: Ident = input.parse()?;
+    let colon: Token![:] = input.parse()?;
+    let bounds = input.parse_terminated(TraitBound::parse, Token![+])?;
+    Ok(Variant {
+        name: Some(name),
+        _colon: Some(colon),
+        bounds,
+    })
+}
+
+impl Parse for Variant {
     fn parse(input: ParseStream) -> Result<Self> {
-        Ok(Self {
-            variant: MakeVariant::parse(input)?,
-        })
-    }
-}
-
-enum MakeVariant {
-    // Creates a variant of a trait under a new name with additional bounds while preserving the original trait.
-    Create {
-        name: Ident,
-        _colon: Token![:],
-        bounds: Punctuated<TraitBound, Plus>,
-    },
-    // Rewrites the original trait into a new trait with additional bounds.
-    Rewrite {
-        bounds: Punctuated<TraitBound, Plus>,
-    },
-}
-
-impl Parse for MakeVariant {
-    fn parse(input: ParseStream) -> Result<Self> {
-        let variant = if input.peek(Ident) && input.peek2(Token![:]) {
-            MakeVariant::Create {
-                name: input.parse()?,
-                _colon: input.parse()?,
-                bounds: input.parse_terminated(TraitBound::parse, Token![+])?,
-            }
-        } else {
-            MakeVariant::Rewrite {
-                bounds: input.parse_terminated(TraitBound::parse, Token![+])?,
-            }
-        };
-        Ok(variant)
+        match parse_bounds_only(input)? {
+            Some(x) => Ok(x),
+            None => parse_fallback(input),
+        }
     }
 }
 
@@ -60,54 +69,43 @@ pub fn make(
     attr: proc_macro::TokenStream,
     item: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let attrs = parse_macro_input!(attr as Attrs);
+    let variant = parse_macro_input!(attr as Variant);
     let item = parse_macro_input!(item as ItemTrait);
 
-    match attrs.variant {
-        MakeVariant::Create { name, bounds, .. } => {
-            let maybe_allow_async_lint = if bounds
-                .iter()
-                .any(|b| b.path.segments.last().unwrap().ident == "Send")
-            {
-                quote! { #[allow(async_fn_in_trait)] }
-            } else {
-                quote! {}
-            };
+    let maybe_allow_async_lint = if variant
+        .bounds
+        .iter()
+        .any(|b| b.path.segments.last().unwrap().ident == "Send")
+    {
+        quote! { #[allow(async_fn_in_trait)] }
+    } else {
+        quote! {}
+    };
 
-            let variant = mk_variant(&name, bounds, &item);
-            let blanket_impl = mk_blanket_impl(&name, &item);
-
-            quote! {
-                #maybe_allow_async_lint
-                #item
-
-                #variant
-
-                #blanket_impl
-            }
-            .into()
-        }
-        MakeVariant::Rewrite { bounds, .. } => {
-            let variant = mk_variant(&item.ident, bounds, &item);
-            quote! {
-                #variant
-            }
-            .into()
-        }
+    let variant_name = variant.clone().name.unwrap_or(item.clone().ident);
+    let variant_def = mk_variant(&variant_name, &variant.bounds, &item);
+    if variant_name == item.ident {
+        return variant_def.into();
     }
+    let blanket_impl = Some(mk_blanket_impl(&variant_name, &item));
+    quote! {
+        #maybe_allow_async_lint
+        #item
+
+        #variant_def
+
+        #blanket_impl
+    }
+    .into()
 }
 
-fn mk_variant(
-    variant: &Ident,
-    with_bounds: Punctuated<TraitBound, Plus>,
-    tr: &ItemTrait,
-) -> TokenStream {
-    let bounds: Vec<_> = with_bounds
+fn mk_variant(name: &Ident, bounds: &Punctuated<TraitBound, Plus>, tr: &ItemTrait) -> TokenStream {
+    let bounds: Vec<_> = bounds
         .into_iter()
         .map(|b| TypeParamBound::Trait(b.clone()))
         .collect();
     let variant = ItemTrait {
-        ident: variant.clone(),
+        ident: name.clone(),
         supertraits: tr.supertraits.iter().chain(&bounds).cloned().collect(),
         items: tr
             .items

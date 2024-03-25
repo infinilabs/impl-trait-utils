@@ -220,8 +220,10 @@ fn mk_blanket_impl(variant: &Ident, tr: &ItemTrait) -> TokenStream {
             item,
             TraitItem::Fn(TraitItemFn {
                 default: Some(_),
+                sig,
                 ..
             })
+            if check_sig(sig).is_some()
         )
     });
 
@@ -230,7 +232,7 @@ fn mk_blanket_impl(variant: &Ident, tr: &ItemTrait) -> TokenStream {
         .unwrap_or_default();
 
     if self_is_sync {
-        blanket_where_clause.push(parse_quote! { for<'s> &'s Self: Send });
+        blanket_where_clause.push(parse_quote! { Self: ::core::marker::Sync });
     }
 
     quote! {
@@ -300,38 +302,29 @@ fn blanket_impl_item(
     }
 }
 
-fn add_receiver_bounds(sig: &mut Signature) {
-    let Some(FnArg::Receiver(Receiver { ty, reference, .. })) = sig.inputs.first_mut() else {
-        return;
+fn check_sig(sig: &Signature) -> Option<&Type> {
+    let Some(FnArg::Receiver(Receiver { ty, reference, .. })) = sig.inputs.first() else {
+        return None;
     };
     let Type::Reference(
         recv_ty @ TypeReference {
             mutability: None, ..
         },
-    ) = &mut **ty
+    ) = &**ty
     else {
-        return;
+        return None;
     };
-    let Some((_and, lt)) = reference else {
-        return;
+    if reference.is_none() {
+        return None;
     };
+    Some(&recv_ty.elem)
+}
 
-    let lifetime = syn::Lifetime {
-        apostrophe: Span::mixed_site(),
-        ident: Ident::new("the_self_lt", Span::mixed_site()),
+fn add_receiver_bounds(sig: &mut Signature) {
+    let Some(recv_ty) = check_sig(sig) else {
+        return;
     };
-    sig.generics.params.insert(
-        0,
-        syn::GenericParam::Lifetime(syn::LifetimeParam {
-            lifetime: lifetime.clone(),
-            colon_token: None,
-            bounds: Default::default(),
-            attrs: Default::default(),
-        }),
-    );
-    recv_ty.lifetime = Some(lifetime.clone());
-    *lt = Some(lifetime);
-    let predicate = parse_quote! { #recv_ty: Send };
+    let predicate = parse_quote! { #recv_ty: ::core::marker::Sync };
 
     if let Some(wh) = &mut sig.generics.where_clause {
         wh.predicates.push(predicate);
